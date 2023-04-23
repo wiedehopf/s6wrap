@@ -23,6 +23,7 @@ SOFTWARE.
 */
 
 #include <stdio.h>
+#include <math.h>
 #include <unistd.h>
 #include <time.h>
 #include <sys/wait.h>
@@ -34,7 +35,11 @@ SOFTWARE.
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/time.h>
+#include <stdarg.h>
 
+
+extern const char *const sys_siglist[];
 
 
 
@@ -44,19 +49,22 @@ SOFTWARE.
 
 #define MAX_LINESIZE (16 * 1024)
 
-static char* programName = "s6wrap";
+static char *programName = "s6wrap";
 
 static int sigchldEventfd = -1;
 static int childPid = -1;
 static int epfd = -1;
 
-static char errBuf[MAX_LINESIZE];
+static char errBuf[MAX_LINESIZE + 1];
 static int errBytes = 0;
-static char outBuf[MAX_LINESIZE];
+static char outBuf[MAX_LINESIZE + 1];
 static int outBytes = 0;
 
-char *prependString = NULL;
-int enableTimestamps = 0;
+static char *prependString = NULL;
+static int enableTimestamps = 0;
+static int enableExecPrint = 1;
+
+static int debug = 0;
 
 
 // where this program should output to
@@ -75,6 +83,56 @@ static int pipe_err[2]; // pipe from child stderr
 #define byteMatchStrict(s1, literal) (memcmp(s1, literal, sizeof(literal)) == 0)
 
 
+int64_t microtime(void) {
+    struct timeval tv;
+    int64_t mst;
+
+    gettimeofday(&tv, NULL);
+    mst = ((int64_t) tv.tv_sec) * 1000LL * 1000LL;
+    mst += tv.tv_usec;
+    return mst;
+}
+
+int64_t mstime(void) {
+    struct timeval tv;
+    int64_t mst;
+
+    gettimeofday(&tv, NULL);
+    mst = ((int64_t) tv.tv_sec)*1000;
+    mst += (int64_t) nearbyint(tv.tv_usec / 1000.0);
+    return mst;
+}
+static void printStart(FILE *stream) {
+    if (prependString) {
+        fprintf(stream, "%s ", prependString);
+    }
+    if (enableTimestamps) {
+        char timebuf[128];
+        time_t now;
+        struct tm local;
+
+        now = time(NULL);
+        localtime_r(&now, &local);
+        strftime(timebuf, 128, "%Y-%m-%d %T", &local);
+        timebuf[127] = 0;
+        fprintf(stream, "[%s.%03d] ", timebuf, (int) (mstime() % 1000));
+    }
+}
+
+void errorPrint(const char *format, ...) __attribute__ ((format(printf, 1, 2)));
+void errorPrint(const char *format, ...) {
+    char msg[1024];
+    va_list ap;
+
+    printStart(outStream);
+
+    va_start(ap, format);
+    vsnprintf(msg, 1024, format, ap);
+    va_end(ap);
+    msg[1023] = 0;
+
+    fprintf(outStream, "%s: %s", programName, msg);
+}
 static void signalEventfd(int fd) {
     uint64_t one = 1;
     ssize_t res = write(fd, &one, sizeof(one));
@@ -87,14 +145,15 @@ static void resetEventfd(int fd) {
 }
 // handler for SIGTERM / SIGINT / SIGQUIT / SIGHUP
 static void sigvarHandler(int sig) {
-    fprintf(stderr, "forwarding signal to child.\n");
+    if (debug) { fprintf(stderr, "forwarding signal %d to child.\n", sig); }
     kill(childPid, sig);
 }
 static void sigchldHandler(int sig) {
     NOTUSED(sig);
     signalEventfd(sigchldEventfd);
 }
-static void usage(int argc, char* argv[], FILE* fStream) {
+static void usage(int argc, char** argv) {
+    FILE *fStream = outStream;
     fprintf(fStream, "%s incorrect usage, invoked by: ", programName);
     for (int k = 0; k < argc; k++) {
         fprintf(fStream, "%s", argv[k]);
@@ -110,8 +169,26 @@ static void usage(int argc, char* argv[], FILE* fStream) {
 }
 static int isExited(int pid, int *exitStatus) {
     int wstatus;
-    waitpid(pid, &wstatus, WNOHANG);
-    if (WIFEXITED(wstatus)) {
+    int res = waitpid(pid, &wstatus, WNOHANG);
+    if (res != pid) {
+        if (res == 0) {
+            // WNOHANG: child state unchanged
+            return 0;
+        }
+        if (res == -1) {
+            fprintf(outStream, "%s: waitpid error: %s", programName, strerror(errno));
+        }
+        if (debug) { fprintf(outStream, "%s: waitpid weird: res %d pid %d", programName, res, pid); }
+        return 0;
+    }
+    int exited = WIFEXITED(wstatus);
+    int signaled = WIFSIGNALED(wstatus);
+    if (exited || signaled) {
+        int termSig = WTERMSIG(wstatus);
+        if (debug) { fprintf(outStream, "child %d exited: %d child signaled %d\n", pid, exited, signaled); }
+        if (signaled) {
+            errorPrint("Child terminated with signal: %s\n", sigdescr_np(termSig));
+        }
         *exitStatus = WEXITSTATUS(wstatus);
         return 1;
     }
@@ -156,6 +233,9 @@ static void setup() {
         }
     }
 
+    // close write sides of the pipes
+    close(pipe_out[1]);
+    close(pipe_err[1]);
 
     // set up signal handlers
     signal(SIGCHLD, sigchldHandler);
@@ -164,9 +244,6 @@ static void setup() {
     signal(SIGQUIT, sigvarHandler);
     signal(SIGHUP, sigvarHandler);
 
-    // close unused write sides of the pipes
-    close(pipe_out[1]);
-    close(pipe_err[1]);
 
     // set pipe outputs nonblock
     setNonblock(pipe_out[0]);
@@ -177,9 +254,9 @@ static void cleanup() {
         free(prependString);
     }
 
-    epoll_ctl(epfd, EPOLL_CTL_DEL, pipe_out[0], NULL);
-    epoll_ctl(epfd, EPOLL_CTL_DEL, pipe_err[0], NULL);
-    epoll_ctl(epfd, EPOLL_CTL_DEL, sigchldEventfd, NULL);
+    //epoll_ctl(epfd, EPOLL_CTL_DEL, pipe_out[0], NULL);
+    //epoll_ctl(epfd, EPOLL_CTL_DEL, pipe_err[0], NULL);
+    //epoll_ctl(epfd, EPOLL_CTL_DEL, sigchldEventfd, NULL);
 
     close(epfd);
 
@@ -187,51 +264,73 @@ static void cleanup() {
     close(pipe_out[0]);
     close(pipe_err[0]);
 
+
+
 }
-static void outputBuffer(char *buf, int bytes) {
+static int outputLine(FILE *stream, char *buf, int bytes) {
     if (bytes <= 0) {
-        return;
+        return 0;
     }
-    int res = fwrite(buf, 1, bytes, outStream);
-    NOTUSED(res);
+    printStart(stream);
+
+    int res = fwrite(buf, 1, bytes, stream);
+    return res;
 }
 static void processChildOutput(int fd, char *buf, int *bufBytes) {
+    int totalBytesWritten = 0;
     while (1) {
         int toRead = MAX_LINESIZE - *bufBytes;
         char *target = buf + *bufBytes;
         int res = read(fd, target, toRead);
-        if (res == -1) {
-            if (errno == EINTR) {
-                continue;
-            } else {
-                break;
+        if (debug) {
+            if (fd == pipe_out[0]) {
+                fprintf(outStream, "pipe_out[0]: read res: %d\n", res);
+            } else if (fd == pipe_err[0]) {
+                fprintf(outStream, "pipe_err[0]: read res: %d\n", res);
             }
         }
-        if (res == 0) {
-            // EOF
-            outputBuffer(buf, *bufBytes);
-            bufBytes = 0;
+        if (res <= 0) {
+            if (res < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;
+                }
+            } else if (res == 0) {
+                // EOF
+                totalBytesWritten += outputLine(outStream, buf, *bufBytes);
+                *bufBytes = 0;
+                // remove from epoll
+                //fprintf(outStream, "*bufBytes: %d\n", *bufBytes);
+                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+            }
+            break;
         }
+
         *bufBytes += res;
-        if (*bufBytes >= 1 && buf[*bufBytes - 1] == '\n') {
-            outputBuffer(buf, *bufBytes);
-            *bufBytes = 0;
-        }
-        char *lastNewline = memrchr(buf, '\n', *bufBytes);
-        if (lastNewline) {
-            int bytes = lastNewline + 1 - buf;
-            outputBuffer(buf, bytes);
+
+        char *start = buf;
+        char *newline;
+        int bytesProcessed = 0;
+        while ((newline = memchr(start, '\n', *bufBytes))) {
+            int bytes = newline + 1 - start;
+            totalBytesWritten += outputLine(outStream, start, bytes);
+            if (debug) { fprintf(outStream, "processed %4d bytes\n", bytes); }
+            bytesProcessed += bytes;
             *bufBytes -= bytes;
-            if (*bufBytes > 0) {
-                memmove(buf, lastNewline + 1, *bufBytes);
-            }
+            start += bytes;
         }
+        if (*bufBytes > 0 && bytesProcessed > 0) {
+            memmove(buf, buf + bytesProcessed, *bufBytes);
+        }
+    }
+    if (totalBytesWritten > 0) {
+        fflush(outStream);
+        //fprintf(outStream, "flushed!\n");
     }
 }
 static int mainLoop() {
-
-    outStream = stdout; // by default output to stdout
-
     struct epoll_event events[MAXEVENTS];
 
     int exitStatus = EXIT_FAILURE;
@@ -239,10 +338,10 @@ static int mainLoop() {
     int childExited = 0;
     // wait on data produced by the child
     while (!childExited) {
-        int count = epoll_wait(epfd, events, MAXEVENTS, 10 * 1000);
+        int count = epoll_wait(epfd, events, MAXEVENTS, 1 * 1000);
         if (count == 0) {
             if (isExited(childPid, &exitStatus)) {
-                fprintf(stderr, "checking status: chld exited\n");
+                fprintf(outStream, "%s: BAD: checking status: chld exited without SIGCHLD being triggered?? this shouldn't be possible!\n", programName);
                 childExited = 1;
             }
         }
@@ -252,10 +351,10 @@ static int mainLoop() {
                 // signal
                 resetEventfd(sigchldEventfd);
                 if (isExited(childPid, &exitStatus)) {
-                    fprintf(stderr, "sigchld / chld exited\n");
+                    //fprintf(outStream, "sigchld / chld exited\n");
                     childExited = 1;
                 } else {
-                    fprintf(stderr, "sigchld no exit\n");
+                    fprintf(outStream, "sigchld no exit\n");
                 }
                 continue;
             } else {
@@ -272,7 +371,7 @@ static int mainLoop() {
                     buf = errBuf;
                     bufBytes = &errBytes;
                 } else {
-                    fprintf(stderr, "%s: ERROR: epoll_wait returned an unexpected file descriptor: %d\n", programName, fd);
+                    fprintf(outStream, "%s: ERROR: epoll_wait returned an unexpected file descriptor: %d\n", programName, fd);
                     exit(EXIT_FAILURE);
                 }
                 processChildOutput(fd, buf, bufBytes);
@@ -282,28 +381,30 @@ static int mainLoop() {
 
     return exitStatus;
 }
+//fprintf(outStream, "%s:%d\n", __FILE__, __LINE__);
 int main(int argc, char* argv[]) {
-    // set linebuffering for stdout / stderr
-    setvbuf(stdout, NULL, _IOLBF, MAX_LINESIZE);
-    setvbuf(stderr, NULL, _IOLBF, MAX_LINESIZE);
+    errBuf[MAX_LINESIZE] = '\0';
+    outBuf[MAX_LINESIZE] = '\0';
 
-    char** eargs = NULL;
+    outStream = stdout; // by default output to stdout
+
+    char** eargv = NULL;
     int eargc = 0;
 
-    for (int k = 0; k < argc; k++) {
+    for (int k = 1; k < argc; k++) {
         char *arg = argv[k];
         // only -- arguments are allowed
         if (arg[0] != '-' || arg[1] != '-') {
-            usage(argc, argv, outStream);
+            usage(argc, argv);
         }
         arg += 2; // skip --
         if (byteMatchStrict(arg, "args")) {
             // parameter parsing done.
             k++;
-            eargs = &argv[k];
+            eargv = &argv[k];
             eargc = argc - k;
             if (eargc <= 0) {
-                usage(argc, argv, outStream);
+                usage(argc, argv);
             }
             break;
         }
@@ -331,20 +432,38 @@ int main(int argc, char* argv[]) {
     sigfillset(&mask);
     sigprocmask(SIG_SETMASK, &mask, NULL);
 
-    int pid = fork();
-    if (pid == -1) {
-        fprintf(outStream, "%s: error on fork: %s\n", programName, strerror(errno));
-        exit(EXIT_FAILURE);
-    }
-
     int flags = 0;
     if (pipe2(pipe_out, flags) || pipe2(pipe_err, flags)) {
         fprintf(outStream, "%s could not create pipes: %s\n", programName, strerror(errno));
         exit(EXIT_FAILURE);
     }
 
+    if (enableExecPrint) {
+        errorPrint("exec: ");
+        for (int k = 0;; k++) {
+            if (!eargv[k]) {
+                break;
+            }
+            if (k != 0) {
+                fprintf(outStream, " ");
+            }
+            fprintf(outStream, "%s", eargv[k]);
+        }
+        fprintf(outStream, "\n");
+    }
+
+    //setvbuf(stdout, NULL, _IOLBF, MAX_LINESIZE);
+    //setvbuf(stderr, NULL, _IOLBF, MAX_LINESIZE);
+
+    int pid = fork();
+    if (pid == -1) {
+        fprintf(outStream, "%s: error on fork: %s\n", programName, strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
     if (pid == 0) {
         // CHILD:
+
         // make stdout / stderr write TO pipe
         dup2(pipe_out[1], STDOUT_FILENO);
         dup2(pipe_err[1], STDERR_FILENO);
@@ -359,12 +478,13 @@ int main(int argc, char* argv[]) {
         sigemptyset(&mask);
         sigprocmask(SIG_SETMASK, &mask, NULL);
 
-        execvp(eargs[0], eargs);
+        execvp(eargv[0], eargv);
         exit(EXIT_FAILURE);   // exec never returns
     }
 
     // PARENT:
     childPid = pid;
+    if (debug) { fprintf(outStream, "childPid: %d\n", childPid); }
 
     setup();
 
@@ -373,10 +493,10 @@ int main(int argc, char* argv[]) {
     sigprocmask(SIG_SETMASK, &mask, NULL);
 
     // call the main Loop doing epoll_wait
-    int exitStatus =  mainLoop();
+    int exitStatus = mainLoop();
 
     cleanup();
 
-    fprintf(outStream, "exiting with %d\n", exitStatus);
+    if (debug) { errorPrint("exiting with status: %d\n", exitStatus); }
     exit(exitStatus);
 }
