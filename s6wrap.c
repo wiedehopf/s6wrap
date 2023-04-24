@@ -123,14 +123,17 @@ static void printStart(FILE *stream) {
         if (0) {
             strftime(timebuf2, 128, "%Z", &local);
             timebuf2[127] = 0;
-            fprintf(stream, "[%s.%03d %s] ", timebuf, (int) (mstime() % 1000), timebuf2);
+            fprintf(stream, "[%s.%03d %s]", timebuf, (int) (mstime() % 1000), timebuf2);
         } else {
             // don't print time zone
-            fprintf(stream, "[%s.%03d] ", timebuf, (int) (mstime() % 1000));
+            fprintf(stream, "[%s.%03d]", timebuf, (int) (mstime() % 1000));
         }
     }
     if (prependString) {
-        fprintf(stream, "%s ", prependString);
+        fprintf(stream, "%s", prependString);
+    }
+    if (enableTimestamps || prependString) {
+        fprintf(stream, " ");
     }
 }
 
