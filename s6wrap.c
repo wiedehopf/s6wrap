@@ -120,9 +120,14 @@ static void printStart(FILE *stream) {
         localtime_r(&now, &local);
         strftime(timebuf, 128, "%Y-%m-%d %T", &local);
         timebuf[127] = 0;
-        strftime(timebuf2, 128, "%Z", &local);
-        timebuf2[127] = 0;
-        fprintf(stream, "[%s.%03d %s] ", timebuf, (int) (mstime() % 1000), timebuf2);
+        if (0) {
+            strftime(timebuf2, 128, "%Z", &local);
+            timebuf2[127] = 0;
+            fprintf(stream, "[%s.%03d %s] ", timebuf, (int) (mstime() % 1000), timebuf2);
+        } else {
+            // don't print time zone
+            fprintf(stream, "[%s.%03d] ", timebuf, (int) (mstime() % 1000));
+        }
     }
     if (prependString) {
         fprintf(stream, "%s ", prependString);
