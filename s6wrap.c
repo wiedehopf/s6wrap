@@ -67,6 +67,11 @@ static int enableExecPrint = 1;
 static int debug = 0;
 
 
+static char** eargv = NULL;
+static int eargc = 0;
+
+
+
 // where this program should output to
 FILE* outStream = NULL;
 
@@ -99,7 +104,7 @@ int64_t mstime(void) {
 
     gettimeofday(&tv, NULL);
     mst = ((int64_t) tv.tv_sec)*1000;
-    mst += (int64_t) nearbyint(tv.tv_usec / 1000.0);
+    mst += tv.tv_usec / 1000;
     return mst;
 }
 static void printStart(FILE *stream) {
@@ -108,6 +113,7 @@ static void printStart(FILE *stream) {
     }
     if (enableTimestamps) {
         char timebuf[128];
+        char timebuf2[128];
         time_t now;
         struct tm local;
 
@@ -115,7 +121,9 @@ static void printStart(FILE *stream) {
         localtime_r(&now, &local);
         strftime(timebuf, 128, "%Y-%m-%d %T", &local);
         timebuf[127] = 0;
-        fprintf(stream, "[%s.%03d] ", timebuf, (int) (mstime() % 1000));
+        strftime(timebuf2, 128, "%Z", &local);
+        timebuf2[127] = 0;
+        fprintf(stream, "[%s.%03d %s] ", timebuf, (int) (mstime() % 1000), timebuf2);
     }
 }
 
@@ -131,8 +139,22 @@ void errorPrint(const char *format, ...) {
     va_end(ap);
     msg[1023] = 0;
 
-    fprintf(outStream, "%s: %s", programName, msg);
+    fprintf(outStream, "[%s] %s", programName, msg);
 }
+
+static void printExecLine() {
+    for (int k = 0;; k++) {
+        if (!eargv[k]) {
+            break;
+        }
+        if (k != 0) {
+            fprintf(outStream, " ");
+        }
+        fprintf(outStream, "%s", eargv[k]);
+    }
+    fprintf(outStream, "\n");
+}
+
 static void signalEventfd(int fd) {
     uint64_t one = 1;
     ssize_t res = write(fd, &one, sizeof(one));
@@ -187,7 +209,9 @@ static int isExited(int pid, int *exitStatus) {
         int termSig = WTERMSIG(wstatus);
         if (debug) { fprintf(outStream, "child %d exited: %d child signaled %d\n", pid, exited, signaled); }
         if (signaled) {
-            errorPrint("Child terminated with signal: %s\n", sigdescr_np(termSig));
+            errorPrint("ERROR: Wrapped program terminated with signal: SIG%s %s\n", sigabbrev_np(termSig), sigdescr_np(termSig));
+            errorPrint("Command line for terminated program was: ");
+            printExecLine();
         }
         *exitStatus = WEXITSTATUS(wstatus);
         return 1;
@@ -388,9 +412,6 @@ int main(int argc, char* argv[]) {
 
     outStream = stdout; // by default output to stdout
 
-    char** eargv = NULL;
-    int eargc = 0;
-
     for (int k = 1; k < argc; k++) {
         char *arg = argv[k];
         // only -- arguments are allowed
@@ -439,17 +460,8 @@ int main(int argc, char* argv[]) {
     }
 
     if (enableExecPrint) {
-        errorPrint("exec: ");
-        for (int k = 0;; k++) {
-            if (!eargv[k]) {
-                break;
-            }
-            if (k != 0) {
-                fprintf(outStream, " ");
-            }
-            fprintf(outStream, "%s", eargv[k]);
-        }
-        fprintf(outStream, "\n");
+        errorPrint("executing: ");
+        printExecLine();
     }
 
     //setvbuf(stdout, NULL, _IOLBF, MAX_LINESIZE);
