@@ -223,12 +223,13 @@ static int isExited(int pid, int *exitStatus) {
         *exitStatus = WEXITSTATUS(wstatus);
         if (debug) { fprintf(outStream, "child %d exited: %d child signaled %d\n", pid, exited, signaled); }
         if (signaled) {
-            if (termSig == SIGILL || termSig == SIGSEGV || termSig == SIGFPE || termSig == SIGABRT) {
-                errorPrint("!!! CAUTION !!! Wrapped program terminated by signal: SIG%s %s\n", sigabbrev_np(termSig), sigdescr_np(termSig));
+            char *strsig = strsignal(termSig);
+            if (termSig == SIGILL || termSig == SIGSEGV || termSig == SIGFPE || termSig == SIGABRT || termSig == SIGBUS) {
+                errorPrint("!!! CAUTION !!! Wrapped program terminated by signal: %s\n", strsig);
                 errorPrint("Command line for terminated program was: ");
                 printExecLine();
             } else {
-                errorPrint("Wrapped program terminated by signal: SIG%s %s\n", sigabbrev_np(termSig), sigdescr_np(termSig));
+                errorPrint("Wrapped program terminated by signal: %s\n", strsig);
             }
         } else if (exited) {
             errorPrint("Wrapped program exited with status: %d (%s)\n", *exitStatus, strerror(*exitStatus));
