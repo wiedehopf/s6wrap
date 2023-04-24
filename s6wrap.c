@@ -485,7 +485,9 @@ int main(int argc, char* argv[]) {
         }
         if (byteMatchStart(arg, "prepend=")) {
             char *value = arg + litLen("prepend=");
-            prependString = strdup(value);
+            if (prependString) { free(prependString); }
+            prependString = malloc(2+1+strlen(value));
+            sprintf(prependString, "[%s]", value);
             continue;
         }
         if (byteMatchStrict(arg, "timestamps")) {
