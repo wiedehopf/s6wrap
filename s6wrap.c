@@ -66,6 +66,8 @@ static int enableExecPrint = 1;
 
 static int debug = 0;
 
+static int ignoreStderr = 0;
+static int ignoreStdout = 0;
 
 static char** eargv = NULL;
 static int eargc = 0;
@@ -108,9 +110,6 @@ int64_t mstime(void) {
     return mst;
 }
 static void printStart(FILE *stream) {
-    if (prependString) {
-        fprintf(stream, "%s ", prependString);
-    }
     if (enableTimestamps) {
         char timebuf[128];
         char timebuf2[128];
@@ -124,6 +123,9 @@ static void printStart(FILE *stream) {
         strftime(timebuf2, 128, "%Z", &local);
         timebuf2[127] = 0;
         fprintf(stream, "[%s.%03d %s] ", timebuf, (int) (mstime() % 1000), timebuf2);
+    }
+    if (prependString) {
+        fprintf(stream, "%s ", prependString);
     }
 }
 
@@ -143,6 +145,9 @@ void errorPrint(const char *format, ...) {
 }
 
 static void printExecLine() {
+    if (!eargv) {
+        return;
+    }
     for (int k = 0;; k++) {
         if (!eargv[k]) {
             break;
@@ -207,13 +212,19 @@ static int isExited(int pid, int *exitStatus) {
     int signaled = WIFSIGNALED(wstatus);
     if (exited || signaled) {
         int termSig = WTERMSIG(wstatus);
+        *exitStatus = WEXITSTATUS(wstatus);
         if (debug) { fprintf(outStream, "child %d exited: %d child signaled %d\n", pid, exited, signaled); }
         if (signaled) {
-            errorPrint("ERROR: Wrapped program terminated with signal: SIG%s %s\n", sigabbrev_np(termSig), sigdescr_np(termSig));
-            errorPrint("Command line for terminated program was: ");
-            printExecLine();
+            if (termSig == SIGILL || termSig == SIGSEGV || termSig == SIGFPE || termSig == SIGABRT) {
+                errorPrint("!!! CAUTION !!! Wrapped program terminated by signal: SIG%s %s\n", sigabbrev_np(termSig), sigdescr_np(termSig));
+                errorPrint("Command line for terminated program was: ");
+                printExecLine();
+            } else {
+                errorPrint("Wrapped program terminated by signal: SIG%s %s\n", sigabbrev_np(termSig), sigdescr_np(termSig));
+            }
+        } else if (exited) {
+            errorPrint("Wrapped program exited with status: %d (%s)\n", *exitStatus, strerror(*exitStatus));
         }
-        *exitStatus = WEXITSTATUS(wstatus);
         return 1;
     }
     return 0;
@@ -291,6 +302,10 @@ static void cleanup() {
 
 
 }
+
+static int fdIgnored(int fd) {
+    return ((fd == pipe_out[0] && ignoreStdout) || (fd == pipe_err[0] && ignoreStderr));
+}
 static int outputLine(FILE *stream, char *buf, int bytes) {
     if (bytes <= 0) {
         return 0;
@@ -323,7 +338,18 @@ static void processChildOutput(int fd, char *buf, int *bufBytes) {
                 }
             } else if (res == 0) {
                 // EOF
-                totalBytesWritten += outputLine(outStream, buf, *bufBytes);
+
+                if (debug) {
+                    if (fd == pipe_out[0]) {
+                        fprintf(outStream, "pipe_out[0]: read got EOF\n");
+                    } else if (fd == pipe_err[0]) {
+                        fprintf(outStream, "pipe_err[0]: read got EOF\n");
+                    }
+                }
+
+                if (!fdIgnored(fd)) {
+                    totalBytesWritten += outputLine(outStream, buf, *bufBytes);
+                }
                 *bufBytes = 0;
                 // remove from epoll
                 //fprintf(outStream, "*bufBytes: %d\n", *bufBytes);
@@ -332,21 +358,23 @@ static void processChildOutput(int fd, char *buf, int *bufBytes) {
             break;
         }
 
-        *bufBytes += res;
+        if (!fdIgnored(fd)) {
+            *bufBytes += res;
 
-        char *start = buf;
-        char *newline;
-        int bytesProcessed = 0;
-        while ((newline = memchr(start, '\n', *bufBytes))) {
-            int bytes = newline + 1 - start;
-            totalBytesWritten += outputLine(outStream, start, bytes);
-            if (debug) { fprintf(outStream, "processed %4d bytes\n", bytes); }
-            bytesProcessed += bytes;
-            *bufBytes -= bytes;
-            start += bytes;
-        }
-        if (*bufBytes > 0 && bytesProcessed > 0) {
-            memmove(buf, buf + bytesProcessed, *bufBytes);
+            char *start = buf;
+            char *newline;
+            int bytesProcessed = 0;
+            while ((newline = memchr(start, '\n', *bufBytes))) {
+                int bytes = newline + 1 - start;
+                totalBytesWritten += outputLine(outStream, start, bytes);
+                if (debug) { fprintf(outStream, "processed %4d bytes\n", bytes); }
+                bytesProcessed += bytes;
+                *bufBytes -= bytes;
+                start += bytes;
+            }
+            if (*bufBytes > 0 && bytesProcessed > 0) {
+                memmove(buf, buf + bytesProcessed, *bufBytes);
+            }
         }
     }
     if (totalBytesWritten > 0) {
@@ -438,8 +466,17 @@ int main(int argc, char* argv[]) {
             }
             continue;
         }
+        if (byteMatchStart(arg, "ignore=")) {
+            char *value = arg + litLen("ignore=");
+            if (byteMatchStrict(value, "stderr")) {
+                ignoreStderr = 1;
+            } else if (byteMatchStrict(value, "stdout")) {
+                ignoreStdout = 1;
+            }
+            continue;
+        }
         if (byteMatchStart(arg, "prepend=")) {
-        char *value = arg + litLen("prepend=");
+            char *value = arg + litLen("prepend=");
             prependString = strdup(value);
             continue;
         }
@@ -449,11 +486,16 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (!eargv) {
+        usage(argc, argv);
+    }
+
     sigset_t mask;
     sigfillset(&mask);
     sigprocmask(SIG_SETMASK, &mask, NULL);
 
-    int flags = 0;
+    int flags = O_DIRECT;
+    flags = 0;
     if (pipe2(pipe_out, flags) || pipe2(pipe_err, flags)) {
         fprintf(outStream, "%s could not create pipes: %s\n", programName, strerror(errno));
         exit(EXIT_FAILURE);
