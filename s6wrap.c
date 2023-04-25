@@ -168,6 +168,18 @@ static void printExecLine() {
     fprintf(outStream, "\n");
 }
 
+static void _sigaction_range(struct sigaction *sa, int first, int last) {
+    int sig;
+    for (sig = first; sig <= last; ++sig) {
+        if (sigaction(sig, sa, NULL)) {
+            /* SIGKILL/SIGSTOP trigger EINVAL.  Ignore */
+            if (errno != EINVAL) {
+                fprintf(stderr, "sigaction(%s[%i]) failed: %s\n", strsignal(sig), sig, strerror(errno));
+            }
+        }
+    }
+}
+
 static void signalEventfd(int fd) {
     uint64_t one = 1;
     ssize_t res = write(fd, &one, sizeof(one));
@@ -178,9 +190,8 @@ static void resetEventfd(int fd) {
     ssize_t res = read(fd, &one, sizeof(one));
     NOTUSED(res);
 }
-// handler for SIGTERM / SIGINT / SIGQUIT / SIGHUP
-static void sigvarHandler(int sig) {
-    if (debug) { fprintf(stderr, "forwarding signal %d to child.\n", sig); }
+static void sigforwardHandler(int sig) {
+    if (debug) { fprintf(stderr, "forwarding signal %d to child. (%s)\n", sig, strsignal(sig)); }
     kill(childPid, sig);
 }
 static void sigchldHandler(int sig) {
@@ -225,11 +236,11 @@ static int isExited(int pid, int *exitStatus) {
         if (signaled) {
             char *strsig = strsignal(termSig);
             if (termSig == SIGILL || termSig == SIGSEGV || termSig == SIGFPE || termSig == SIGABRT || termSig == SIGBUS) {
-                errorPrint("!!! CAUTION !!! Wrapped program terminated by signal: %s\n", strsig);
+                errorPrint("!!! CAUTION !!! Wrapped program terminated by signal: %d (%s)\n", termSig, strsig);
                 errorPrint("Command line for terminated program was: ");
                 printExecLine();
             } else {
-                errorPrint("Wrapped program terminated by signal: %s\n", strsig);
+                errorPrint("Wrapped program terminated by signal: %d (%s)\n", termSig, strsig);
             }
         } else if (exited) {
             errorPrint("Wrapped program exited with status: %d (%s)\n", *exitStatus, strerror(*exitStatus));
@@ -281,12 +292,15 @@ static void setup() {
     close(pipe_out[1]);
     close(pipe_err[1]);
 
-    // set up signal handlers
+    // set all signal handlers to the sigforwardHandler
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sigfillset(&sa.sa_mask);
+    sa.sa_handler = sigforwardHandler;
+    _sigaction_range(&sa, 1, 31);
+
+    // set sigchld to our handler
     signal(SIGCHLD, sigchldHandler);
-    signal(SIGTERM, sigvarHandler);
-    signal(SIGINT, sigvarHandler);
-    signal(SIGQUIT, sigvarHandler);
-    signal(SIGHUP, sigvarHandler);
 
 
     // set pipe outputs nonblock
@@ -501,6 +515,7 @@ int main(int argc, char* argv[]) {
         usage(argc, argv);
     }
 
+    // block signals
     sigset_t mask;
     sigfillset(&mask);
     sigprocmask(SIG_SETMASK, &mask, NULL);
