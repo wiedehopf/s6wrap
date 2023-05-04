@@ -69,6 +69,8 @@ static int debug = 0;
 static int ignoreStderr = 0;
 static int ignoreStdout = 0;
 
+static int quiet = 0;
+
 static char** eargv = NULL;
 static int eargc = 0;
 
@@ -209,7 +211,7 @@ static void usage(int argc, char** argv) {
     }
     fprintf(fStream, "\n");
 
-    fprintf(fStream, "%s usage hint: %s [--output=<stdout|stderr> (default:stdout)] [--ignore=<stdout|stderr>] [--prepend=<identifier>] [--timestamps] --args <COMMAND --ARG1 --ARG2 VALUE2 [...] (don't quote the entire thing)>\n", programName, programName);
+    fprintf(fStream, "%s usage hint: %s [--output=<stdout|stderr> (default:stdout)] [--quiet] [--ignore=<stdout|stderr>] [--prepend=<identifier>] [--timestamps] --args <COMMAND --ARG1 --ARG2 VALUE2 [...] (don't quote the entire thing)>\n", programName, programName);
     fprintf(fStream, "by default stderr is merged with stdout line by line and the result written to --output\n");
     exit(EXIT_FAILURE);
 }
@@ -239,10 +241,10 @@ static int isExited(int pid, int *exitStatus) {
                 errorPrint("!!! CAUTION !!! Wrapped program terminated by signal: %d (%s)\n", termSig, strsig);
                 errorPrint("Command line for terminated program was: ");
                 printExecLine();
-            } else {
+            } else if (!quiet) {
                 errorPrint("Wrapped program terminated by signal: %d (%s)\n", termSig, strsig);
             }
-        } else if (exited) {
+        } else if (exited && !quiet) {
             errorPrint("Wrapped program exited with status: %d (%s)\n", *exitStatus, strerror(*exitStatus));
         }
         return 1;
@@ -509,6 +511,10 @@ int main(int argc, char* argv[]) {
             enableTimestamps = 1;
             continue;
         }
+        if (byteMatchStrict(arg, "quiet")) {
+            quiet = 1;
+            continue;
+        }
     }
 
     if (!eargv) {
@@ -527,7 +533,7 @@ int main(int argc, char* argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    if (enableExecPrint) {
+    if (enableExecPrint && !quiet) {
         errorPrint("executing: ");
         printExecLine();
     }
