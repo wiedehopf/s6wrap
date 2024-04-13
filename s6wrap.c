@@ -431,7 +431,7 @@ static int mainLoop() {
                     //fprintf(outStream, "sigchld / chld exited\n");
                     childExited = 1;
                 } else {
-                    fprintf(outStream, "sigchld no exit\n");
+                    //fprintf(outStream, "sigchld no exit\n");
                 }
                 continue;
             } else {
