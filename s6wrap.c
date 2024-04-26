@@ -515,6 +515,7 @@ int main(int argc, char* argv[]) {
             quiet = 1;
             continue;
         }
+        usage(argc, argv);
     }
 
     if (!eargv) {
