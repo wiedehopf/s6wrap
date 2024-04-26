@@ -565,7 +565,9 @@ int main(int argc, char* argv[]) {
         sigprocmask(SIG_SETMASK, &mask, NULL);
 
         execvp(eargv[0], eargv);
-        exit(EXIT_FAILURE);   // exec never returns
+        // exec only returns on error with errno set
+        fprintf(stderr, "%s: bad command: '%s': %s\n", programName, eargv[0], strerror(errno));
+        exit(EXIT_FAILURE);
     }
 
     // PARENT:
