@@ -244,7 +244,7 @@ static int isExited(int pid, int *exitStatus) {
             } else if (!quiet) {
                 errorPrint("Wrapped program terminated by signal: %d (%s)\n", termSig, strsig);
             }
-        } else if (exited && !quiet) {
+        } else if (exited && !quiet && *exitStatus != ENOMEDIUM) {
             errorPrint("Wrapped program exited with status: %d (%s)\n", *exitStatus, strerror(*exitStatus));
         }
         return 1;
@@ -568,7 +568,7 @@ int main(int argc, char* argv[]) {
         execvp(eargv[0], eargv);
         // exec only returns on error with errno set
         fprintf(stderr, "%s: bad command: '%s': %s\n", programName, eargv[0], strerror(errno));
-        exit(EXIT_FAILURE);
+        exit(ENOMEDIUM);
     }
 
     // PARENT:
