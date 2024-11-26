@@ -57,8 +57,10 @@ static int epfd = -1;
 
 static char errBuf[MAX_LINESIZE + 1];
 static int errBytes = 0;
+static int errContinue = 0;
 static char outBuf[MAX_LINESIZE + 1];
 static int outBytes = 0;
+static int outContinue = 0;
 
 static char *prependString = NULL;
 static int enableTimestamps = 0;
@@ -331,16 +333,18 @@ static void cleanup() {
 static int fdIgnored(int fd) {
     return ((fd == pipe_out[0] && ignoreStdout) || (fd == pipe_err[0] && ignoreStderr));
 }
-static int outputLine(FILE *stream, char *buf, int bytes) {
+static int outputLine(FILE *stream, char *buf, int bytes, int cont) {
     if (bytes <= 0) {
         return 0;
     }
-    printStart(stream);
+    if (!cont) {
+        printStart(stream);
+    }
 
     int res = fwrite(buf, 1, bytes, stream);
     return res;
 }
-static void processChildOutput(int fd, char *buf, int *bufBytes) {
+static void processChildOutput(int fd, char *buf, int *bufBytes, int *cont) {
     int totalBytesWritten = 0;
     while (1) {
         int toRead = MAX_LINESIZE - *bufBytes;
@@ -373,7 +377,7 @@ static void processChildOutput(int fd, char *buf, int *bufBytes) {
                 }
 
                 if (!fdIgnored(fd)) {
-                    totalBytesWritten += outputLine(outStream, buf, *bufBytes);
+                    totalBytesWritten += outputLine(outStream, buf, *bufBytes, *cont);
                 }
                 *bufBytes = 0;
                 // remove from epoll
@@ -391,7 +395,17 @@ static void processChildOutput(int fd, char *buf, int *bufBytes) {
             int bytesProcessed = 0;
             while ((newline = memchr(start, '\n', *bufBytes))) {
                 int bytes = newline + 1 - start;
-                totalBytesWritten += outputLine(outStream, start, bytes);
+                totalBytesWritten += outputLine(outStream, start, bytes, *cont);
+                if (debug) { fprintf(outStream, "processed %4d bytes\n", bytes); }
+                *cont = 0;
+                bytesProcessed += bytes;
+                *bufBytes -= bytes;
+                start += bytes;
+            }
+            if (*bufBytes == MAX_LINESIZE) {
+                int bytes = *bufBytes;
+                totalBytesWritten += outputLine(outStream, start, bytes, *cont);
+                *cont = 1;
                 if (debug) { fprintf(outStream, "processed %4d bytes\n", bytes); }
                 bytesProcessed += bytes;
                 *bufBytes -= bytes;
@@ -440,18 +454,21 @@ static int mainLoop() {
 
                 int *bufBytes = NULL;
                 char *buf = NULL;
+                int *cont = NULL;
 
                 if (fd == pipe_out[0]) {
                     buf = outBuf;
                     bufBytes = &outBytes;
+                    cont = &outContinue;
                 } else if (fd == pipe_err[0]) {
                     buf = errBuf;
                     bufBytes = &errBytes;
+                    cont = &errContinue;
                 } else {
                     fprintf(outStream, "%s: ERROR: epoll_wait returned an unexpected file descriptor: %d\n", programName, fd);
                     exit(EXIT_FAILURE);
                 }
-                processChildOutput(fd, buf, bufBytes);
+                processChildOutput(fd, buf, bufBytes, cont);
             }
         }
     }
