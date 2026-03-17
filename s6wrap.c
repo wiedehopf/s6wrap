@@ -99,7 +99,7 @@ int64_t microtime(void) {
     int64_t mst;
 
     gettimeofday(&tv, NULL);
-    mst = ((int64_t) tv.tv_sec) * 1000LL * 1000LL;
+    mst = ((int64_t) tv.tv_sec) * (1000LL * 1000LL);
     mst += tv.tv_usec;
     return mst;
 }
@@ -109,28 +109,30 @@ int64_t mstime(void) {
     int64_t mst;
 
     gettimeofday(&tv, NULL);
-    mst = ((int64_t) tv.tv_sec)*1000;
-    mst += tv.tv_usec / 1000;
+    mst = ((int64_t) tv.tv_sec)*1000LL;
+    mst += tv.tv_usec / 1000LL;
     return mst;
 }
 static void printStart(FILE *stream) {
     if (enableTimestamps) {
         char timebuf[128];
         char timebuf2[128];
-        time_t now;
         struct tm local;
 
-        now = time(NULL);
+        int64_t milli = mstime();
+        time_t now = milli / 1000LL;
+        int remainder = milli % 1000;
+
         localtime_r(&now, &local);
         strftime(timebuf, 128, "%Y-%m-%d %T", &local);
         timebuf[127] = 0;
         if (0) {
             strftime(timebuf2, 128, "%Z", &local);
             timebuf2[127] = 0;
-            fprintf(stream, "[%s.%03d %s]", timebuf, (int) (mstime() % 1000), timebuf2);
+            fprintf(stream, "[%s.%03d %s]", timebuf, remainder, timebuf2);
         } else {
             // don't print time zone
-            fprintf(stream, "[%s.%03d]", timebuf, (int) (mstime() % 1000));
+            fprintf(stream, "[%s.%03d]", timebuf, remainder);
         }
     }
     if (prependString) {
